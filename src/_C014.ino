@@ -24,18 +24,17 @@
 // #include <BlynkSimpleEsp8266_SSL.h>
 
 void CPlugin_014_handleInterrupt() {
-  // This plugin uses modified blynk library.
-  // It includes support of calling this callback during time-wait operations
+  // This cplugin uses modified blynk library.
+  // It includes support of calling this during time-wait operations
   // like blynk connection process to keep espeasy stability.
   backgroundtasks();
 }
 
 
-// called from main loop
 void Blynk_Run_c014(){
-    if (WiFiConnected())
-      if (Blynk.connected())
-        Blynk.run();
+    // user callbacks processing. Called from run10TimesPerSecond.
+    if (Blynk.connected())
+      Blynk.run();
 }
 
 
@@ -74,6 +73,9 @@ bool CPlugin_014(byte function, struct EventStruct *event, String& string)
 
      case CPLUGIN_PROTOCOL_SEND:
       {
+        if (!Settings.ControllerEnabled[event->ControllerIndex])
+          break;
+
         // Collect the values at the same run, to make sure all are from the same sample
         byte valueCount = getValueCountFromSensorType(event->sensorType);
         C014_queue_element element(event, valueCount);
@@ -85,7 +87,8 @@ bool CPlugin_014(byte function, struct EventStruct *event, String& string)
           bool isvalid;
           String formattedValue = formatUserVar(event, x, isvalid);
           if (!isvalid)
-            formattedValue = F("error");
+            // send empty string to Blynk in case of error
+            formattedValue = F("");
 
           String valueName = ExtraTaskSettings.TaskDeviceValueNames[x];
           String valueFullName = ExtraTaskSettings.TaskDeviceName;
@@ -93,8 +96,6 @@ bool CPlugin_014(byte function, struct EventStruct *event, String& string)
           valueFullName += valueName;
           String vPinNumberStr = valueName.substring(1, 4);
           int vPinNumber = vPinNumberStr.toInt();
-          element.vPin[x] = vPinNumber;
-          element.txt[x] = formattedValue;
           String log = F("BL ");
           log += Blynk.connected()? F("(online): ") : F("(offline): ");
           if (vPinNumber > 0 && vPinNumber < 256){
@@ -113,7 +114,8 @@ bool CPlugin_014(byte function, struct EventStruct *event, String& string)
             log += vPinNumberStr;
           }
           addLog(LOG_LEVEL_INFO, log);
-
+          element.vPin[x] = vPinNumber;
+          element.txt[x] = formattedValue;
         }
         success = C014_DelayHandler.addToQueue(element);
         scheduleNextDelayQueue(TIMER_C014_DELAY_QUEUE, C014_DelayHandler.getNextScheduleTime());
@@ -128,6 +130,10 @@ bool CPlugin_014(byte function, struct EventStruct *event, String& string)
 //********************************************************************************
 // controller_plugin_number = 014 because of C014
 bool do_process_c014_delay_queue(int controller_plugin_number, const C014_queue_element& element, ControllerSettingsStruct& ControllerSettings) {
+  if (!Settings.ControllerEnabled[element.controller_idx])
+    // controller has been disabled. Answer true to flush queue.
+    return true;
+
   if (wifiStatus != ESPEASY_WIFI_SERVICES_INITIALIZED) {
     return false;
   }
@@ -135,7 +141,7 @@ bool do_process_c014_delay_queue(int controller_plugin_number, const C014_queue_
   if (!Blynk_keep_connection_c014(element.controller_idx, ControllerSettings))
     return false;
 
-  while (element.txt[element.valuesSent] == "" || element.vPin[element.valuesSent] == -1) {
+  while (element.vPin[element.valuesSent] == -1) {
   //   A non valid value, which we are not going to send.
   //   answer ok and skip real sending
     if (element.checkDone(true))
