@@ -71,6 +71,24 @@ bool CPlugin_014(byte function, struct EventStruct *event, String& string)
        break;
       }
 
+    case CPLUGIN_WEBFORM_SAVE:
+      {
+        success = true;
+        if (isFormItemChecked(F("controllerenabled"))){
+          for (byte i = 0; i < CONTROLLER_MAX; ++i) {
+            byte ProtocolIndex = getProtocolIndex(Settings.Protocol[i]);
+            if (i != event->ControllerIndex && Protocol[ProtocolIndex].Number == 14 && Settings.ControllerEnabled[i]) {
+              success = false;
+              // FIXME:  this will only show a warning message and not uncheck "enabled" in webform.
+              // Webserver object is not checking result of "success" var :(
+              addHtmlError(F("Only one enabled instance of blynk controller is supported"));
+              break;
+            }
+          }
+        }
+        break;
+      }
+
      case CPLUGIN_PROTOCOL_SEND:
       {
         if (!Settings.ControllerEnabled[event->ControllerIndex])
@@ -161,7 +179,8 @@ boolean Blynk_keep_connection_c014(int controllerIndex, ControllerSettingsStruct
     boolean connectDefault = false;
     String log = F("BL: ");
 
-    static unsigned long blLastConnectAttempt = millis() - 60000;
+    static unsigned long blLastConnectAttempt[CONTROLLER_MAX];
+    blLastConnectAttempt[controllerIndex] = millis() - 60000;
     static String oldHost = ControllerSettings.getHost();
 
     if (ControllerSettings.getHost() != oldHost){
@@ -169,15 +188,15 @@ boolean Blynk_keep_connection_c014(int controllerIndex, ControllerSettingsStruct
       addLog(LOG_LEVEL_INFO, log);
       log = F("BL: ");
       oldHost = ControllerSettings.getHost();
-      blLastConnectAttempt = millis() - 60000;
+      blLastConnectAttempt[controllerIndex] = millis() - 60000;
     }
     else{
-      if (timePassedSince(blLastConnectAttempt) < 60000){
+      if (timePassedSince(blLastConnectAttempt[controllerIndex]) < 60000){
         // log += "skip connect to blynk server too often. Wait a little...";
         // addLog(LOG_LEVEL_INFO, log);
         return false;
       }
-      blLastConnectAttempt = millis();
+      blLastConnectAttempt[controllerIndex] = millis();
     }
 
     if (ControllerSettings.UseDNS){
