@@ -1,6 +1,9 @@
 #ifdef USES_P082
 //#######################################################################################################
 //#################################### Plugin 082: OpenTherm Device #####################################
+// tested with:
+// * opentherm adapter  http://ihormelnyk.com/opentherm_adapter
+// * Bosch Gas 6000 boiler
 //#######################################################################################################
 
 // only one boiler device is supported now
@@ -15,7 +18,7 @@
 #define PLUGIN_VALUENAME1_082 "TSetUser"
 
 // (RO) boiler accepted temperature.
-// Tested Bosch GAS 6000 boiler will accept:
+// Tested Bosch Gas 6000 boiler will accept:
 //    0 if TSetUser < 40
 //    TSetUser if TSetUser <= MaxTSet
 //    MaxTSet if TSetUser > MaxTSet
@@ -43,18 +46,25 @@
 
 #define P82_Nchars 3 // temperature input webform digits count
 
+// according opentherm specification - delay cant be greater than 5 sec, otherwise boiler will go to self-control mode.
+// In self-control mode MaxTSet value is used and TSet value is ignored.
+// When tested with Bosch Gas 6000 - it works only with delay <= 3 sec.
+// OT library examples provides 1 sec delay.
+#define P82_poll_delay_sec 3
+
 enum  Plugin_082_values{
-  vTSetUser,
-  vTSet,
-  vMaxTSet,
-  vTboiler,
-  vASFflags
+  vTSetUser, // user desired software-specified temperature
+  vTSet,     // eq. TSetUser if its value is correct. Boiler accepted desired temperature <= MaxTSet.
+  vMaxTSet,  // max margin of TSet, set via boiler control panel
+  vTboiler,  // actual current CH temperature of the boiler
+  vASFflags  // error flags
 };
 
-OpenTherm* ot=NULL;
+OpenTherm* ot = NULL;
+byte P82_run_counter = 0;
 
 void Plugin_082_handleInterrupt() {
-  // called at any inPin statte change
+  // called at any inPin state change
   ot->handleInterrupt();
   backgroundtasks(); // not tested !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 }
@@ -107,40 +117,41 @@ boolean Plugin_082(byte function, struct EventStruct *event, String& string)
         break;
       }
 
-    // case PLUGIN_WEBFORM_LOAD:
-    //   {
-    //     LoadTaskSettings(event->TaskIndex);
-    //     String argName = F("p082_template");
-    //     int16_t webFormValue = ExtraTaskSettings.TaskDevicePluginConfig[0];
-    //     addFormTextBox(String(F("TSetUser")), argName, String(webFormValue), P82_Nchars);
-    //     success = true;
-    //     break;
-    //   }
+    case PLUGIN_WEBFORM_LOAD:
+      {
+        LoadTaskSettings(event->TaskIndex);
+        String argName = F("p082_template");
+        int16_t webFormValue = ExtraTaskSettings.TaskDevicePluginConfig[0];
+        addFormTextBox(String(F("Default temperature")), argName, String(webFormValue), P82_Nchars);
+        success = true;
+        break;
+      }
 
-    // case PLUGIN_WEBFORM_SAVE:
-    //   {
-    //     String error;
-    //     String argName = F("p082_template");
-    //     char webFormValue[P82_Nchars];
-    //     if (!safe_strncpy(webFormValue, WebServer.arg(argName), P82_Nchars)) {
-    //       error = F("Settings save error");
-    //     }
-    //     if (error.length() > 0) {
-    //       addHtmlError(error);
-    //       success = false;
-    //     }
-    //     else {
-    //       ExtraTaskSettings.TaskDevicePluginConfig[0] = atoi(webFormValue);
-    //       SaveTaskSettings(event->TaskIndex);
-    //       success = true;
-    //     }
-    //     break;
-    //   }
+    case PLUGIN_WEBFORM_SAVE:
+      {
+        String error;
+        String argName = F("p082_template");
+        char webFormValue[P82_Nchars];
+        if (!safe_strncpy(webFormValue, WebServer.arg(argName), P82_Nchars)) {
+          error = F("Settings save error");
+        }
+        if (error.length() > 0) {
+          addHtmlError(error);
+          success = false;
+        }
+        else {
+          ExtraTaskSettings.TaskDevicePluginConfig[0] = atoi(webFormValue);
+          SaveTaskSettings(event->TaskIndex);
+          success = true;
+        }
+        break;
+      }
 
     case PLUGIN_INIT:
       {
-        // LoadTaskSettings(event->TaskIndex);
-        // UserVar[event->BaseVarIndex + Plugin_082_values::vTSetUser] = ExtraTaskSettings.TaskDevicePluginConfig[0];
+        LoadTaskSettings(event->TaskIndex);
+        UserVar[event->BaseVarIndex + Plugin_082_values::vTSetUser] = ExtraTaskSettings.TaskDevicePluginConfig[0];
+
         int rxPin = Settings.TaskDevicePin1[event->TaskIndex];
         int txPin = Settings.TaskDevicePin2[event->TaskIndex];
         // only one boiler is supported!
@@ -157,9 +168,22 @@ boolean Plugin_082(byte function, struct EventStruct *event, String& string)
       }
 
     case PLUGIN_READ:
+    {
+      success = true;
+      break;
+    }
+
+    case PLUGIN_ONCE_A_SECOND:
       {
         if (ot == NULL)
           return false;
+
+        P82_run_counter +=1;
+        if (P82_run_counter < P82_poll_delay_sec){
+          return true;
+        }
+        P82_run_counter = 0;
+
         int rxPin = Settings.TaskDevicePin1[event->TaskIndex];
         int txPin = Settings.TaskDevicePin2[event->TaskIndex];
 
@@ -169,11 +193,13 @@ boolean Plugin_082(byte function, struct EventStruct *event, String& string)
         bool enableCentralHeating = userTemperature;
       	bool enableHotWater = true;
       	bool enableCooling = false;
-        String log = F("");
         float errorCode = 0;
 
         unsigned int request;
         unsigned int response;
+        // it is possible to get status by read or by write request.
+        // read status request will not start heating mode.
+        // thats why set status request is used.
         unsigned long status = ot->setBoilerStatus(enableCentralHeating, enableHotWater, enableCooling);
       	OpenThermResponseStatus responseStatus = ot->getLastResponseStatus();
       	if (responseStatus == OpenThermResponseStatus::SUCCESS) {
@@ -185,16 +211,26 @@ boolean Plugin_082(byte function, struct EventStruct *event, String& string)
             errorCode = (response == 0) ? 1 : response;
           }
 
-          // request boiler for current heating (CH) temperature
+          // Tboiler is actual current CH temperature of the boiler.
+          // Tboiler supports only read request.
+          // When TBoiler becomes > Tset + margin1 then fire will off.
+          // When TBoiler becomes < Tset-margin2 then fire will on.
+          // margin1 and margin2 values (hysteresis) can be set via boiler control panel in service menu.
           request = ot->buildRequest(OpenThermRequestType::READ, OpenThermMessageID::Tboiler, 0);
           UserVar[event->BaseVarIndex + Plugin_082_values::vTboiler] = ot->getTemperature(ot->sendRequest(request));
 
-          // set userTemperature for boiler. Analyzing reply.
+          // TSet is the desired CH temperature of the boiler.
+          // This is software defined value.
+          // TSet supports only write request. Actual TSet value is returned as request result.
+          // TSet cant be greater than MaxTSet.
+          // When setting TSet value > MaxTSet then MaxTSet will be used.
           request = ot->buildRequest(OpenThermRequestType::WRITE, OpenThermMessageID::TSet, ot->temperatureToData(userTemperature));
           response = ot->sendRequest(request);
           if (ot->isCentralHeatingEnabled(status)){
             UserVar[event->BaseVarIndex + Plugin_082_values::vTSet] = ot->getTemperature(response);
-            // request boiler for MaxTSet
+            // MaxTSet is the desired CH temperature of the boiler.
+            // This value can be set via boiler control panel, and cant be set via software.
+            // MaxTSet supports only read request.
             request = ot->buildRequest(OpenThermRequestType::READ, OpenThermMessageID::MaxTSet, 0);
             UserVar[event->BaseVarIndex + Plugin_082_values::vMaxTSet] = ot->getTemperature(ot->sendRequest(request));
           }
@@ -203,9 +239,11 @@ boolean Plugin_082(byte function, struct EventStruct *event, String& string)
             UserVar[event->BaseVarIndex + Plugin_082_values::vTSet] = 0;
             UserVar[event->BaseVarIndex + Plugin_082_values::vMaxTSet] = 0;
           }
-          log += F("OT device polling ok");
+          // log += F("OT device polling ok");
       	}
         else {
+          String log = F("");
+
           // some communication errors
         	if (responseStatus == OpenThermResponseStatus::NONE) {
         		log += F("OT Error: OpenTherm is not initialized");
@@ -222,14 +260,14 @@ boolean Plugin_082(byte function, struct EventStruct *event, String& string)
           UserVar[event->BaseVarIndex + Plugin_082_values::vTSet] = NAN;
           UserVar[event->BaseVarIndex + Plugin_082_values::vTboiler] = NAN;
           UserVar[event->BaseVarIndex + Plugin_082_values::vMaxTSet] = NAN;
+          log += F(" (rx pin ");
+          log += rxPin;
+          log += F(", tx pin ");
+          log += txPin;
+          log += F(")");
+          addLog(LOG_LEVEL_INFO,log);
         }
         UserVar[event->BaseVarIndex + Plugin_082_values::vASFflags] = errorCode;
-        log += F(" (rx pin ");
-        log += rxPin;
-        log += F(", tx pin ");
-        log += txPin;
-        log += F(")");
-        addLog(LOG_LEVEL_INFO,log);
 
         // check if userTemperature was changed or not
         // LoadTaskSettings(event->TaskIndex);
